@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Template for extending our on prem AD into AWS.
+Description: Template for extending on-prem Active Directory into AWS
 Parameters:
   SNSTopic:
     Type: String
