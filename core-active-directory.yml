@@ -6,10 +6,10 @@ Parameters:
     Description: SNS topic for opsgenie endpoint to trigger slack alert
   ADServerProfile:
     Type: String
-    Description: Hard coded value from nonprod for testing
+    Description: ARN of the instance profile
   DomainControllerSG:
     Type: AWS::EC2::SecurityGroup::Id
-    Description: Hard coded value from nonprod for testing
+    Description: Firewall rules for the on-prem and aws domain controllers to communicate
   DomainControllerIPAddress:
     Type: String
     Description: What IP address the domain controller will have
@@ -98,25 +98,25 @@ Resources:
        UserData:
          Fn::Base64: |
            <powershell>
-      
+
            # Kill script if there are any errors
            $error.clear()
            $ErrorActionPreference = "Stop"
            Set-StrictMode -Version 2.0
-      
+
            # Retrieve SSM Parameters
            $domain = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDomainName)
            $user = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADAdmin)
            $password = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADAdminPassword -WithDecryption $true)
            $cred = $password.Value | ConvertTo-SecureString -AsPlainText -Force
            $dsrmpassword = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADDSRMPassword -WithDecryption $true)
-      
+
            # Set time and language
            Set-WinUserLanguageList en-au -Force
            Set-Culture en-au
            tzutil /s "AUS Eastern Standard Time"
            Write-Output "Location/Culture/Timezone has been set" | Out-File C:\log.txt
-      
+
            # Set static dns
            $dns1 = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDNS1)
            $dns2 = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDNS2)
@@ -124,10 +124,10 @@ Resources:
            $wmi = Get-WmiObject win32_networkadapterconfiguration -Filter "ipenabled = 'true'"
            $wmi.SetDNSServerSearchOrder($dns)
            "Static DNS has been set" | Add-Content C:\log.txt
-      
+
            # Set Credentials
            $credentials =  New-Object System.Management.Automation.PSCredential($user.Value,$cred)
-      
+
            # Write out script 2 to a file that gets run at startup as a scheduled task
            $script2 = @'
            # Variables
@@ -141,43 +141,43 @@ Resources:
            $dsrmcred = New-Object System.Management.Automation.PSCredential($dsrmpassword.Value) | ConvertTo-SecureString -AsPlainText -Force
            $ServiceName = "Active Directory Domain Services"
            $sitename = (Get-SSMParameter -Name /ActiveDirectory/DomainController/ADSiteName)
-      
+
            # logic - checking if ad service exists and runs install active directory script if not or returns that the service is installed if it exists
            $Service = Get-Service -Display $ServiceName -ErrorAction SilentlyContinue
-      
+
            If (-Not $Service) {
                Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
                Import-Module ADDSDeployment
                Install-ADDSDomainController -NoGlobalCatalog:$false -CreateDnsDelegation:$false -Credential:$credentials -CriticalReplicationOnly:$false -DatabasePath "C:\Windows\NTDS" -DomainName:$domain.Value -InstallDns:$true -LogPath "C:\Windows\NTDS" -NoRebootOnCompletion:$false -ReplicationSourceDC:$replicationsource.Value -SiteName:$sitename.Value -SysvolPath "C:\Windows\SYSVOL" -Force:$true -SafeModeAdministratorPassword:$dsrmcred
            }
-      
+
            Else {
                $ServiceName + " is installed."
                $ServiceName + "'s status is: " + $service.Status
            }
            '@
-      
+
            $script2 | Out-File -FilePath "C:\script2.ps1"
-      
+
            "AD Config script dumped to a file on c drive" | Add-Content c:\log.txt
-      
+
            # Scheduled task creation
            $script = "C:\script2.ps1"
            $argument = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -File $script"
            $action = New-ScheduledTaskAction -Execute 'Powershell.exe' -Argument "$script"
            $trigger =  New-ScheduledTaskTrigger -AtStartup
            $principal = New-ScheduledTaskPrincipal -UserID "System" -LogonType s4u -RunLevel Highest
-      
+
            Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "AD" -Description "Scheduled task to install AD DC" -Principal $principal
-      
+
            "Scheduled task to run the AD config script at startup has been created" | Add-Content c:\log.txt
-      
+
            # DomainJoin
            Add-Computer -DomainName $domain.Value -Credential $credentials
            Restart-Computer -Force
-      
+
            "Joined to the domain" | Add-Content c:\log.txt
-      
+
            </powershell>
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
