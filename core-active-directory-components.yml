@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template for resources used in core-active-directory
+Parameters:
+  OfficeSubnetCIDR:
+    AllowedPattern: >-
+      ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+    ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/16-28
+    Default: 10.0.1.0/24
+    Description: CIDR block for on prem domain.
+    Type: String
+  VPCID:
+    Description: 'ID of the VPC (e.g., vpc-0343606e)'
+    Type: 'AWS::EC2::VPC::Id'
+Rules:
+  SubnetsInVPC:
+    Assertions:
+      - Assert:
+          'Fn::EachMemberIn':
+            - 'Fn::ValueOfAll':
+                - 'AWS::EC2::Subnet::Id'
+                - VpcId
+            - 'Fn::RefAll': 'AWS::EC2::VPC::Id'
+        AssertDescription: All subnets must in the VPC    
+Resources:
+  SystemManagerParameterKMS:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Description: "Used to get credentials from SSM for the UserData script"
+      KeyPolicy:
+        Id: "AD SSM KMS Key"
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS:
+              - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow access for Key Administrators
+            Effect: Allow
+            Principal:
+              AWS:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/Administrator
+            Action:
+            - kms:Create*
+            - kms:Describe*
+            - kms:Enable*
+            - kms:List*
+            - kms:Put*
+            - kms:Update*
+            - kms:Revoke*
+            - kms:Disable*
+            - kms:Get*
+            - kms:Delete*
+            - kms:TagResource
+            - kms:UntagResource
+            - kms:ScheduleKeyDeletion
+            - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/Administrator
+            Action:
+            - kms:Encrypt
+            - kms:Decrypt
+            - kms:ReEncrypt*
+            - kms:GenerateDataKey*
+            - kms:DescribeKey
+            Resource: '*'
+          - Sid: Allow attachment of persistent resources
+            Effect: Allow
+            Principal:
+              AWS:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/Administrator
+            Action:
+            - kms:CreateGrant
+            - kms:ListGrants
+            - kms:RevokeGrant
+            Resource: '*'
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: true
+  iamSsmUsersPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ADSSM
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource:
+              - !GetAtt SystemManagerParameterKMS.Arn
+          - Effect: Allow
+            Action:
+              - ssm:DescribeParameters
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ActiveDirectory/DomainController/*
+      Roles:
+        - !Ref ADServerRole
+  ADServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Policies: []
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Effect: Allow
+        Version: 2012-10-17
+  ADServerProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref ADServerRole
+      Path: /
+  MySecurityGroupIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref DomainControllerSG
+      IpProtocol: tcp
+      ToPort: '65535'
+      FromPort: '0'
+      SourceSecurityGroupId: !Ref DomainControllerSG
+    DependsOn: DomainControllerSG
+  DomainControllerSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Domain Controller inbound from office network
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '1512'
+          ToPort: '1512'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '1512'
+          ToPort: '1512'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '135'
+          ToPort: '135'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '135'
+          ToPort: '135'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '53'
+          ToPort: '53'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '53'
+          ToPort: '53'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '3389'
+          ToPort: '3389'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '139'
+          ToPort: '139'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '445'
+          ToPort: '445'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '445'
+          ToPort: '445'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '464'
+          ToPort: '464'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '464'
+          ToPort: '464'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '1024'
+          ToPort: '65535'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '49152'
+          ToPort: '65535'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '389'
+          ToPort: '389'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '138'
+          ToPort: '138'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '389'
+          ToPort: '389'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '636'
+          ToPort: '636'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '42'
+          ToPort: '42'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '42'
+          ToPort: '42'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '3268'
+          ToPort: '3268'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '3269'
+          ToPort: '3269'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '88'
+          ToPort: '88'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '88'
+          ToPort: '88'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '3389'
+          ToPort: '3389'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '53'
+          ToPort: '53'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '53'
+          ToPort: '53'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '25'
+          ToPort: '25'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '5722'
+          ToPort: '5722'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '123'
+          ToPort: '123'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '67'
+          ToPort: '67'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: tcp
+          FromPort: '137'
+          ToPort: '137'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '137'
+          ToPort: '137'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: udp
+          FromPort: '139'
+          ToPort: '139'
+          CidrIp: !Ref OfficeSubnetCIDR
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: !Ref OfficeSubnetCIDR

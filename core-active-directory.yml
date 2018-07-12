@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template for extending our on prem AD into AWS.
+Parameters:
+  SNSTopic:
+    Type: String
+    Description: SNS topic for opsgenie endpoint to trigger slack alert
+  ADServerProfile:
+    Type: String
+    Description: Hard coded value from nonprod for testing
+  DomainControllerSG:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Hard coded value from nonprod for testing
+  DomainControllerIPAddress:
+    Type: String
+    Description: What IP address the domain controller will have
+  Subnets:
+    Type: AWS::EC2::Subnet::Id
+    Description: What subnet to deploy to
+  ADInstanceType:
+    AllowedValues:
+      - t2.large
+      - m3.large
+      - m3.xlarge
+      - m3.2xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+    Default: m4.xlarge
+    Description: Amazon EC2 instance type for the first Active Directory Instance
+    Type: String
+  KeyPairName:
+    Description: >-
+      Public/private key pairs allow you to securely connect to your instance
+      after it launches
+    Type: 'AWS::EC2::KeyPair::KeyName'
+Mappings:
+  AWSAMIRegionMap:
+    AMI:
+      WS2012R2: Windows_Server-2012-R2_RTM-English-64Bit-Base-2018.01.12
+    ap-northeast-1:
+      WS2012R2: ami-1a7ee47c
+    ap-northeast-2:
+      WS2012R2: ami-0b4eee65
+    ap-south-1:
+      WS2012R2: ami-c488dfab
+    ap-southeast-1:
+      WS2012R2: ami-c83944b4
+    ap-southeast-2:
+      WS2012R2: ami-30a55952
+    ca-central-1:
+      WS2012R2: ami-41ab2e25
+    eu-central-1:
+      WS2012R2: ami-3204995d
+    eu-west-1:
+      WS2012R2: ami-cc821eb5
+    eu-west-2:
+      WS2012R2: ami-9f677cfb
+    sa-east-1:
+      WS2012R2: ami-d6c785ba
+    us-east-1:
+      WS2012R2: ami-013e197b
+    us-east-2:
+      WS2012R2: ami-02446e67
+    us-west-1:
+      WS2012R2: ami-92fefdf2
+    us-west-2:
+      WS2012R2: ami-afe051d7
+Resources:
+  CloudwatchMonitoring:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: True
+      AlarmActions:
+        - !Ref SNSTopic
+      OKActions:
+        - !Ref SNSTopic
+      AlarmDescription: Alarm to alert every when Domain Controller goes down
+      Period: 60
+      Statistic: Minimum
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_Instance
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      TreatMissingData: breaching
+      EvaluationPeriods: 5
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Ref: ADDomainController
+  ADDomainController:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      SubnetId: !Ref Subnets
+      PrivateIpAddress: !Ref DomainControllerIPAddress
+      Monitoring: True
+      KeyName: !Ref KeyPairName
+       UserData:
+         Fn::Base64: |
+           <powershell>
+      
+           # Kill script if there are any errors
+           $error.clear()
+           $ErrorActionPreference = "Stop"
+           Set-StrictMode -Version 2.0
+      
+           # Retrieve SSM Parameters
+           $domain = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDomainName)
+           $user = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADAdmin)
+           $password = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADAdminPassword -WithDecryption $true)
+           $cred = $password.Value | ConvertTo-SecureString -AsPlainText -Force
+           $dsrmpassword = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADDSRMPassword -WithDecryption $true)
+      
+           # Set time and language
+           Set-WinUserLanguageList en-au -Force
+           Set-Culture en-au
+           tzutil /s "AUS Eastern Standard Time"
+           Write-Output "Location/Culture/Timezone has been set" | Out-File C:\log.txt
+      
+           # Set static dns
+           $dns1 = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDNS1)
+           $dns2 = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDNS2)
+           $dns = $dns1.Value,$dns2.Value
+           $wmi = Get-WmiObject win32_networkadapterconfiguration -Filter "ipenabled = 'true'"
+           $wmi.SetDNSServerSearchOrder($dns)
+           "Static DNS has been set" | Add-Content C:\log.txt
+      
+           # Set Credentials
+           $credentials =  New-Object System.Management.Automation.PSCredential($user.Value,$cred)
+      
+           # Write out script 2 to a file that gets run at startup as a scheduled task
+           $script2 = @'
+           # Variables
+           $user = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADAdmin)
+           $domain = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremDomainName)
+           $replicationsource = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremReplicationSourceDC)
+           $password = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADAdminPassword -WithDecryption $true)
+           $dsrmpassword = (Get-SSMParameter -Name /ActiveDirectory/DomainController/OnPremADDSRMPassword)
+           $cred = $password.Value | ConvertTo-SecureString -AsPlainText -Force
+           $credentials =  New-Object System.Management.Automation.PSCredential($user.Value,$cred)
+           $dsrmcred = New-Object System.Management.Automation.PSCredential($dsrmpassword.Value) | ConvertTo-SecureString -AsPlainText -Force
+           $ServiceName = "Active Directory Domain Services"
+           $sitename = (Get-SSMParameter -Name /ActiveDirectory/DomainController/ADSiteName)
+      
+           # logic - checking if ad service exists and runs install active directory script if not or returns that the service is installed if it exists
+           $Service = Get-Service -Display $ServiceName -ErrorAction SilentlyContinue
+      
+           If (-Not $Service) {
+               Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+               Import-Module ADDSDeployment
+               Install-ADDSDomainController -NoGlobalCatalog:$false -CreateDnsDelegation:$false -Credential:$credentials -CriticalReplicationOnly:$false -DatabasePath "C:\Windows\NTDS" -DomainName:$domain.Value -InstallDns:$true -LogPath "C:\Windows\NTDS" -NoRebootOnCompletion:$false -ReplicationSourceDC:$replicationsource.Value -SiteName:$sitename.Value -SysvolPath "C:\Windows\SYSVOL" -Force:$true -SafeModeAdministratorPassword:$dsrmcred
+           }
+      
+           Else {
+               $ServiceName + " is installed."
+               $ServiceName + "'s status is: " + $service.Status
+           }
+           '@
+      
+           $script2 | Out-File -FilePath "C:\script2.ps1"
+      
+           "AD Config script dumped to a file on c drive" | Add-Content c:\log.txt
+      
+           # Scheduled task creation
+           $script = "C:\script2.ps1"
+           $argument = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -File $script"
+           $action = New-ScheduledTaskAction -Execute 'Powershell.exe' -Argument "$script"
+           $trigger =  New-ScheduledTaskTrigger -AtStartup
+           $principal = New-ScheduledTaskPrincipal -UserID "System" -LogonType s4u -RunLevel Highest
+      
+           Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "AD" -Description "Scheduled task to install AD DC" -Principal $principal
+      
+           "Scheduled task to run the AD config script at startup has been created" | Add-Content c:\log.txt
+      
+           # DomainJoin
+           Add-Computer -DomainName $domain.Value -Credential $credentials
+           Restart-Computer -Force
+      
+           "Joined to the domain" | Add-Content c:\log.txt
+      
+           </powershell>
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 100
+            VolumeType: gp2
+      ImageId: !FindInMap
+        - AWSAMIRegionMap
+        - !Ref 'AWS::Region'
+        - WS2012R2
+      IamInstanceProfile: !Ref ADServerProfile
+      InstanceType: !Ref ADInstanceType
+      SecurityGroupIds:
+        - !Ref DomainControllerSG
+
+Outputs:
+  DomainControllerSGID:
+    Value: !Ref DomainControllerSG
+    Description: Domain Member Security Group ID
