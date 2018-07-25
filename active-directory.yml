@@ -95,8 +95,8 @@ Resources:
       PrivateIpAddress: !Ref DomainControllerIPAddress
       Monitoring: True
       KeyName: !Ref KeyPairName
-       UserData:
-         Fn::Base64: |
+      UserData:
+        Fn::Base64: |
            <powershell>
 
            # Kill script if there are any errors
